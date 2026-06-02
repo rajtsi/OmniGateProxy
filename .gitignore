@@ -1,0 +1,26 @@
+# 1. Compiled Object files & Binaries
+*.o
+*.out
+*.exe
+bin/
+build/
+omni_gate
+
+# 2. macOS specific OS files (Very important for Mac users!)
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# 3. IDEs and Editors (VS Code, Vim, etc.)
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 4. Logs and databases
+*.log
+*.sqlite
