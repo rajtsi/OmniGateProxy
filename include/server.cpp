@@ -1,4 +1,4 @@
-#include "../include/server.h"
+#include "server.h"
 #include <sys/socket.h>
 #include <iostream>
 #include <cstring>
@@ -10,11 +10,17 @@
 #include <mutex>
 using namespace std;
 std::mutex mtx;
-OmniGate::OmniGate(int port, vector<int> vt)
+OmniGate::OmniGate(int port, vector<int> vt, int thread_count)
 {
     this->port = port;
     this->current_index = 0;
     this->backend_ports = vt;
+    this->pool = new ThreadPool(thread_count);
+}
+
+OmniGate::~OmniGate()
+{
+    delete this->pool;
 }
 
 int OmniGate::getNextPort()
@@ -28,7 +34,7 @@ int OmniGate::getNextPort()
     return port;
 }
 
-void OmniGate::handel_client(int client_fd)
+void OmniGate::handle_client(int client_fd)
 {
 
     char buffer[4096];
@@ -38,7 +44,7 @@ void OmniGate::handel_client(int client_fd)
         int backend_fd = socket(AF_INET, SOCK_STREAM, 0);
         if (backend_fd < 0)
         {
-            cout << "unable to connect to backend end server";
+            cout << "Unable to connect to backend end server";
             close(backend_fd);
             return;
         }
@@ -55,10 +61,13 @@ void OmniGate::handel_client(int client_fd)
         {
             close(backend_fd);
             int new_port = getNextPort();
+            std::
+                    cout
+                << "old port not working " << initial_port << "->" << new_port << std::endl;
             if (new_port == initial_port)
             {
                 cout << "backend connection failed ";
-                cout << "backend connection failed";
+
                 string response = "HTTP/1.1 200 OK\r\n"
                                   "Content-Type: text/html\r\n"
                                   "Connection: close\r\n\r\n"
@@ -74,8 +83,6 @@ void OmniGate::handel_client(int client_fd)
             backend_connect = connect(backend_fd, (struct sockaddr *)&backend_config, sizeof(backend_config));
         }
 
-        buffer[rec_bytes] = '\0';
-        cout << " Receaved " << buffer << "buffer recieved from browser ends here" << endl;
         send(backend_fd, buffer, rec_bytes, 0);
         while (true)
         {
@@ -84,7 +91,7 @@ void OmniGate::handel_client(int client_fd)
             if (backend_res <= 0)
                 break;
             backend_buffer[backend_res] = '\0';
-            cout << "backend responded with " << backend_buffer << "backend response end here " << endl;
+            //  cout << "backend responded with " << backend_buffer << "backend response end here " << endl;
             send(client_fd, backend_buffer, backend_res, 0);
         }
         close(backend_fd);
@@ -127,14 +134,11 @@ void OmniGate::start_server()
     cout << "Proxy is listening on port " << port << endl;
     while (true)
     {
-        int client_fd = accept(proxy_fd, nullptr, nullptr);
-        if (client_fd > 0)
-        {
 
-            cout << "[+] New Browser Connected! Client FD: " << client_fd << " -> Assigned to Thread." << endl;
-            thread t(&OmniGate::handel_client, this, client_fd);
-            t.detach();
-        }
+        int client_fd = accept(proxy_fd, nullptr, nullptr);
+        std::cout << "Recieved a new Request";
+        pool->add_job([this, client_fd]
+                      { this->handle_client(client_fd); });
     }
     close(proxy_fd);
 }
