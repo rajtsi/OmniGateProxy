@@ -1,4 +1,4 @@
-#include "server.h"
+#include "../include/server.h"
 #include <sys/socket.h>
 #include <iostream>
 #include <cstring>
@@ -8,6 +8,8 @@
 #include <thread>
 #include <vector>
 #include <mutex>
+#include <chrono>
+#include <csignal>
 using namespace std;
 std::mutex mtx;
 OmniGate::OmniGate(int port, vector<int> vt, int thread_count)
@@ -17,10 +19,20 @@ OmniGate::OmniGate(int port, vector<int> vt, int thread_count)
     this->backend_ports = vt;
     this->pool = new ThreadPool(thread_count);
 }
-
+bool OmniGate::start_flag = true;
+int OmniGate::proxy_fd = -1;
 OmniGate::~OmniGate()
 {
     delete this->pool;
+}
+void OmniGate::server_handler(int sigint)
+{
+    OmniGate::start_flag = false;
+    if (OmniGate::proxy_fd != -1)
+    {
+        shutdown(OmniGate::proxy_fd, SHUT_RD);
+        close(OmniGate::proxy_fd);
+    }
 }
 
 int OmniGate::getNextPort()
@@ -94,6 +106,10 @@ void OmniGate::handle_client(int client_fd)
             //  cout << "backend responded with " << backend_buffer << "backend response end here " << endl;
             send(client_fd, backend_buffer, backend_res, 0);
         }
+        // std::this_thread::sleep_for(std::chrono::milliseconds(8000));
+        auto threadId = std::this_thread::get_id();
+        std::cout << std::endl
+                  << "threadclosed  " << threadId << std::endl;
         close(backend_fd);
     }
     else
@@ -105,40 +121,53 @@ void OmniGate::handle_client(int client_fd)
 
 void OmniGate::start_server()
 {
-    int proxy_fd = socket(AF_INET, SOCK_STREAM, 0); // Asked for a socket from OS
-    if (proxy_fd == -1)                             // less than 0 means falied
+    std::signal(SIGINT, server_handler);
+    OmniGate::proxy_fd = socket(AF_INET, SOCK_STREAM, 0); // Asked for a socket from OS
+    if (OmniGate::proxy_fd == -1)                         // less than 0 means falied
     {
         perror("Failed to create proxy server socket");
         return;
     }
-    cout << "Server socket created with proxy FD: " << proxy_fd << endl;
+    cout << "Server socket created with proxy FD: " << OmniGate::proxy_fd << endl;
     struct sockaddr_in listner_config;                  // creating sockaddr config for listening socket
     memset(&listner_config, 0, sizeof(listner_config)); // making sure that the object that we made is clear and has no garbage values
     listner_config.sin_family = AF_INET;                // ipv4
     listner_config.sin_port = htons(port);              // using port for listeninga nd also htons(host to network short for converting from Little-Endian to Big-Endian)
     listner_config.sin_addr.s_addr = INADDR_ANY;        // 0.0.0.0 = INADDR_ANY for setting that no ip restriction for request
 
-    if (::bind(proxy_fd, (struct sockaddr *)&listner_config, sizeof(listner_config)) == -1)
+    if (::bind(OmniGate::proxy_fd, (struct sockaddr *)&listner_config, sizeof(listner_config)) == -1)
     {
         perror("Bind failed (Port may be in use)");
-        close(proxy_fd);
+        close(OmniGate::proxy_fd);
         return;
     }
 
-    if (listen(proxy_fd, 10) == -1)
+    if (listen(OmniGate::proxy_fd, 10) == -1)
     {
         perror("Listen failed");
-        close(proxy_fd);
+        close(OmniGate::proxy_fd);
         return;
     }
     cout << "Proxy is listening on port " << port << endl;
-    while (true)
+    while (OmniGate::start_flag)
     {
+        int client_fd = accept(OmniGate::proxy_fd, nullptr, nullptr);
 
-        int client_fd = accept(proxy_fd, nullptr, nullptr);
-        std::cout << "Recieved a new Request";
+        if (!OmniGate::start_flag)
+        {
+            if (client_fd > 0)
+                close(client_fd);
+            break;
+        }
+
+        if (client_fd < 0)
+        {
+            continue;
+        }
+
+        std::cout << "Received a new Request\n";
         pool->add_job([this, client_fd]
                       { this->handle_client(client_fd); });
     }
-    close(proxy_fd);
+    close(OmniGate::proxy_fd);
 }

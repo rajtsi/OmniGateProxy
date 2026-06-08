@@ -10,6 +10,9 @@ class OmniGate
     int current_index;
     void handle_client(int client_fd);
     int getNextPort();
+    static bool start_flag;
+    static void server_handler(int sigint);
+    static int proxy_fd;
 
 public:
     void start_server();

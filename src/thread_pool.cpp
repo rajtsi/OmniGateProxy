@@ -1,4 +1,4 @@
-#include "thread_pool.h"
+#include "../include/thread_pool.h"
 
 ThreadPool::ThreadPool(int num_threads)
 {
@@ -35,8 +35,6 @@ void ThreadPool::worker_loop()
             tasks.pop();
         }
 
-        auto threadId = std::this_thread::get_id();
-        std::cout << "threadId " << threadId << std::endl;
         task();
     }
 }
@@ -52,4 +50,5 @@ ThreadPool::~ThreadPool()
     {
         worker.join();
     }
+    std::cout << "Thread pool distructor was called ";
 }
