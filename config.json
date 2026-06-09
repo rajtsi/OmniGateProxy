@@ -1,0 +1,22 @@
+{
+    "server_port": 8080,
+    "worker_threads": 3,
+    "enable_layer7": true,
+    "layer4_ports": [
+        9003
+    ],
+    "layer7_routes": {
+        "/video": [
+            {
+                "ip": "127.0.0.1",
+                "port": 9001
+            }
+        ],
+        "/chat": [
+            {
+                "ip": "127.0.0.1",
+                "port": 9002
+            }
+        ]
+    }
+}

@@ -3,7 +3,7 @@ CXXFLAGS = -std=c++11 -Wall
 
 all:
 	mkdir -p bin
-	$(CXX) $(CXXFLAGS) src/main.cpp src/server.cpp src/thread_pool.cpp -o bin/omni_gate
+	clang++ -std=c++17 -Wall src/main.cpp src/server.cpp src/thread_pool.cpp src/httpparser.cpp src/layer7.cpp -o bin/omni_gate
 
 clean:
 	rm -rf bin/

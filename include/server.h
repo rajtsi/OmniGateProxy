@@ -1,21 +1,54 @@
 #pragma once
 #include <vector>
+#include <string>
+#include <utility>
 #include "thread_pool.h"
+#include "layer7.h"
+#include "httpparser.h"
+
 class OmniGate
 {
-
+private:
+    // Server Configuration
     int port;
-    ThreadPool *pool;
+    int worker_threads;
+    bool is_layer7_enabled;
+
+    // Layer 4 Variables
     std::vector<int> backend_ports;
-    int current_index;
-    void handle_client(int client_fd);
-    int getNextPort();
+    size_t current_index = 0;
+
+    // Components
+    ThreadPool *pool = nullptr;
+    Layer7 *layer7_balancer = nullptr;
+
+    // Static members for Signal Handling
     static bool start_flag;
-    static void server_handler(int sigint);
     static int proxy_fd;
 
+    // Singleton Setup
+    OmniGate() = default;
+
+    OmniGate(const OmniGate &) = delete;
+    OmniGate &operator=(const OmniGate &) = delete;
+
+    // Internal Methods
+    std::pair<std::string, int> get_backend_target(const std::string &path);
+    void handle_client(int client_fd);
+
 public:
-    void start_server();
-    OmniGate(int port, std::vector<int> vt, int thread_count);
+    static OmniGate &getInstance()
+    {
+        static OmniGate instance;
+        return instance;
+    }
+
+    // Destructor
     ~OmniGate();
+
+    // Public API
+    void load_config(const std::string &filepath);
+    void start_server();
+
+    static void server_handler(int sigint);
 };

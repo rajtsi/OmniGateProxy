@@ -1,8 +1,12 @@
 #include "../include/server.h"
+#include <iostream>
 
-int main()
+int main(int argc, char *argv[])
 {
-    OmniGate myserver(8080, {9000, 9001, 9002}, 3);
+    std::string config_path = (argc > 1) ? argv[1] : "../config.json";
+    OmniGate &myserver = OmniGate::getInstance();
+    myserver.load_config(config_path);
     myserver.start_server();
+
     return 0;
 }

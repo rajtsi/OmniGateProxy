@@ -1,4 +1,5 @@
 #include "../include/server.h"
+#include "../include/httpparser.h"
 #include <sys/socket.h>
 #include <iostream>
 #include <cstring>
@@ -10,21 +11,24 @@
 #include <mutex>
 #include <chrono>
 #include <csignal>
+#include <fstream>
+#include "../include/json.hpp"
+
+using json = nlohmann::json;
 using namespace std;
-std::mutex mtx;
-OmniGate::OmniGate(int port, vector<int> vt, int thread_count)
-{
-    this->port = port;
-    this->current_index = 0;
-    this->backend_ports = vt;
-    this->pool = new ThreadPool(thread_count);
-}
+
+std::mutex l4_mtx;
 bool OmniGate::start_flag = true;
 int OmniGate::proxy_fd = -1;
+
 OmniGate::~OmniGate()
 {
-    delete this->pool;
+    if (this->pool)
+        delete this->pool;
+    if (this->layer7_balancer)
+        delete this->layer7_balancer;
 }
+
 void OmniGate::server_handler(int sigint)
 {
     OmniGate::start_flag = false;
@@ -35,109 +39,183 @@ void OmniGate::server_handler(int sigint)
     }
 }
 
-int OmniGate::getNextPort()
+std::pair<std::string, int> OmniGate::get_backend_target(const std::string &path)
 {
+    if (this->is_layer7_enabled && this->layer7_balancer)
+    {
 
-    mtx.lock();
-    int port = backend_ports[current_index];
-    current_index++;
-    current_index %= 3;
-    mtx.unlock();
-    return port;
+        if (this->layer7_balancer->Layer7check(path))
+        {
+            auto target = this->layer7_balancer->nextPort(path);
+
+            if (target.second != -1)
+            {
+                return target;
+            }
+            else
+            {
+
+                std::cout << "CRITICAL: All Layer 7 servers for path " << path << " are dead!" << std::endl;
+                return {"", -2};
+            }
+        }
+    }
+
+    // Layer 4
+    l4_mtx.lock();
+    int b_port = backend_ports[current_index];
+    current_index = (current_index + 1) % backend_ports.size();
+    l4_mtx.unlock();
+
+    return {"127.0.0.1", b_port};
 }
 
 void OmniGate::handle_client(int client_fd)
 {
+    struct sockaddr_in client_addr;
+    socklen_t addr_len = sizeof(client_addr);
+    getpeername(client_fd, (struct sockaddr *)&client_addr, &addr_len);
+    char client_ip[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, INET_ADDRSTRLEN);
 
     char buffer[4096];
     int rec_bytes = recv(client_fd, buffer, sizeof(buffer) - 1, 0);
-    if (rec_bytes > 0)
+
+    if (rec_bytes <= 0)
     {
-        int backend_fd = socket(AF_INET, SOCK_STREAM, 0);
-        if (backend_fd < 0)
+        close(client_fd);
+        return;
+    }
+
+    std::string req_path = "";
+    std::string raw_request(buffer, rec_bytes);
+
+    if (this->is_layer7_enabled)
+    {
+        buffer[rec_bytes] = '\0';
+        HttpRequest req(buffer);
+        req_path = req.path;
+
+        std::cout << "\n--- Layer 7 Request Details ---" << std::endl;
+        std::cout << "Path: " << req_path << std::endl;
+
+        size_t header_end = raw_request.find("\r\n\r\n");
+        if (header_end != std::string::npos)
         {
-            cout << "Unable to connect to backend end server";
-            close(backend_fd);
-            return;
+            std::string header_to_inject = "X-Forwarded-For: " + std::string(client_ip) + "\r\n";
+            raw_request.insert(header_end + 2, header_to_inject);
         }
+    }
 
-        struct sockaddr_in backend_config;
-        memset(&backend_config, 0, sizeof(backend_config));
-        backend_config.sin_family = AF_INET;
-        inet_pton(AF_INET, "127.0.0.1", &backend_config.sin_addr);
-        int initial_port = getNextPort();
-        backend_config.sin_port = htons(initial_port);
-        int backend_connect = connect(backend_fd, (struct sockaddr *)&backend_config, sizeof(backend_config));
+    std::cout << "\n--- Request Details ---" << std::endl;
+    std::cout << "Path: " << req_path << std::endl;
+    std::cout << "Real Client IP: " << client_ip << std::endl;
 
-        while (backend_connect < 0)
-        {
-            close(backend_fd);
-            int new_port = getNextPort();
-            std::
-                    cout
-                << "old port not working " << initial_port << "->" << new_port << std::endl;
-            if (new_port == initial_port)
-            {
-                cout << "backend connection failed ";
+    auto target = get_backend_target(req_path);
 
-                string response = "HTTP/1.1 200 OK\r\n"
-                                  "Content-Type: text/html\r\n"
-                                  "Connection: close\r\n\r\n"
-                                  "<h1>Unable to connect to any servers!</h1>"
-                                  "<p> This response is from  load Ballancer</p>";
-                send(client_fd, response.c_str(), response.length(), 0);
-                close(backend_fd);
-                close(client_fd);
-                return;
-            }
-            backend_fd = socket(AF_INET, SOCK_STREAM, 0);
-            backend_config.sin_port = htons(new_port);
-            backend_connect = connect(backend_fd, (struct sockaddr *)&backend_config, sizeof(backend_config));
-        }
+    if (target.second == -2)
+    {
+        std::cout << "Service Unavailable for path: " << req_path << std::endl;
+        std::string response = "HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n<h1>503: Service Unavailable</h1>";
+        send(client_fd, response.c_str(), response.length(), 0);
+        close(client_fd);
+        return;
+    }
 
-        send(backend_fd, buffer, rec_bytes, 0);
-        while (true)
-        {
-            char backend_buffer[4096];
-            int backend_res = recv(backend_fd, backend_buffer, sizeof(backend_buffer) - 1, 0);
-            if (backend_res <= 0)
-                break;
-            backend_buffer[backend_res] = '\0';
-            //  cout << "backend responded with " << backend_buffer << "backend response end here " << endl;
-            send(client_fd, backend_buffer, backend_res, 0);
-        }
-        // std::this_thread::sleep_for(std::chrono::milliseconds(8000));
-        auto threadId = std::this_thread::get_id();
-        std::cout << std::endl
-                  << "threadclosed  " << threadId << std::endl;
+    std::cout << "Routing to -> " << target.first << ":" << target.second << std::endl;
+
+    int backend_fd = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in backend_config;
+    memset(&backend_config, 0, sizeof(backend_config));
+    backend_config.sin_family = AF_INET;
+
+    inet_pton(AF_INET, target.first.c_str(), &backend_config.sin_addr);
+    backend_config.sin_port = htons(target.second);
+
+    if (connect(backend_fd, (struct sockaddr *)&backend_config, sizeof(backend_config)) < 0)
+    {
+        std::cout << "Backend Connection Failed!" << std::endl;
+        string response = "HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n<h1>502: Bad Gateway</h1>";
+        send(client_fd, response.c_str(), response.length(), 0);
         close(backend_fd);
+        close(client_fd);
+        return;
     }
-    else
+
+    send(backend_fd, raw_request.c_str(), raw_request.length(), 0);
+
+    while (true)
     {
-        cout << "no bytes recieved from browser request ";
+        char backend_buffer[4096];
+        int backend_res = recv(backend_fd, backend_buffer, sizeof(backend_buffer) - 1, 0);
+        if (backend_res <= 0)
+            break;
+        send(client_fd, backend_buffer, backend_res, 0);
     }
+
+    close(backend_fd);
     close(client_fd);
+}
+
+void OmniGate::load_config(const std::string &filepath)
+{
+    std::ifstream file(filepath);
+    if (!file.is_open())
+    {
+        std::cerr << "Config file (" << filepath << ") nahi mili bhaisahab!" << std::endl;
+        exit(1);
+    }
+
+    json config = json::parse(file);
+
+    this->port = config["server_port"];
+    this->worker_threads = config["worker_threads"];
+    this->is_layer7_enabled = config["enable_layer7"];
+    this->pool = new ThreadPool(this->worker_threads);
+
+    std::vector<int> l4_ports = config["layer4_ports"];
+    this->backend_ports = l4_ports;
+    this->current_index = 0;
+
+    if (this->is_layer7_enabled)
+    {
+        std::cout << "Starting in Layer 7 (Smart Routing) Mode..." << std::endl;
+        std::vector<std::string> paths;
+        std::vector<std::vector<std::pair<std::string, int>>> details;
+
+        for (auto &[path, servers] : config["layer7_routes"].items())
+        {
+            paths.push_back(path);
+            std::vector<std::pair<std::string, int>> server_list;
+            for (auto &s : servers)
+            {
+                server_list.push_back({s["ip"], s["port"]});
+            }
+            details.push_back(server_list);
+        }
+        this->layer7_balancer = new Layer7(paths, details);
+    }
 }
 
 void OmniGate::start_server()
 {
     std::signal(SIGINT, server_handler);
-    OmniGate::proxy_fd = socket(AF_INET, SOCK_STREAM, 0); // Asked for a socket from OS
-    if (OmniGate::proxy_fd == -1)                         // less than 0 means falied
+    OmniGate::proxy_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (OmniGate::proxy_fd == -1)
     {
         perror("Failed to create proxy server socket");
         return;
     }
-    cout << "Server socket created with proxy FD: " << OmniGate::proxy_fd << endl;
-    struct sockaddr_in listner_config;                  // creating sockaddr config for listening socket
-    memset(&listner_config, 0, sizeof(listner_config)); // making sure that the object that we made is clear and has no garbage values
-    listner_config.sin_family = AF_INET;                // ipv4
-    listner_config.sin_port = htons(port);              // using port for listeninga nd also htons(host to network short for converting from Little-Endian to Big-Endian)
-    listner_config.sin_addr.s_addr = INADDR_ANY;        // 0.0.0.0 = INADDR_ANY for setting that no ip restriction for request
+
+    struct sockaddr_in listner_config;
+    memset(&listner_config, 0, sizeof(listner_config));
+    listner_config.sin_family = AF_INET;
+    listner_config.sin_port = htons(this->port);
+    listner_config.sin_addr.s_addr = INADDR_ANY;
 
     if (::bind(OmniGate::proxy_fd, (struct sockaddr *)&listner_config, sizeof(listner_config)) == -1)
     {
-        perror("Bind failed (Port may be in use)");
+        perror("Bind failed");
         close(OmniGate::proxy_fd);
         return;
     }
@@ -148,7 +226,9 @@ void OmniGate::start_server()
         close(OmniGate::proxy_fd);
         return;
     }
-    cout << "Proxy is listening on port " << port << endl;
+
+    cout << "OmniGate Proxy is successfully running on port " << this->port << endl;
+
     while (OmniGate::start_flag)
     {
         int client_fd = accept(OmniGate::proxy_fd, nullptr, nullptr);
@@ -161,11 +241,8 @@ void OmniGate::start_server()
         }
 
         if (client_fd < 0)
-        {
             continue;
-        }
 
-        std::cout << "Received a new Request\n";
         pool->add_job([this, client_fd]
                       { this->handle_client(client_fd); });
     }
