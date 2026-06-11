@@ -24,3 +24,10 @@ omni_gate
 # 4. Logs and databases
 *.log
 *.sqlite
+
+# 5. Node.js & MCP Server
+node_modules/
+npm-debug.log
+yarn-error.log
+.env
+.env.*
