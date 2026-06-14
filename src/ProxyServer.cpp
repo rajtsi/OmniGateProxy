@@ -12,6 +12,8 @@
 #include <chrono>
 #include <csignal>
 #include <fstream>
+#include "../include/MetricsTracker.hpp"
+#include "../include/RpsTracker.hpp"
 #include "../include/json.hpp"
 
 using json = nlohmann::json;
@@ -61,7 +63,7 @@ std::pair<std::string, int> OmniGate::get_backend_target(const std::string &path
         }
     }
 
-    // Layer 4
+    // Layer 4 ballancing logic
     l4_mtx.lock();
     int b_port = backend_ports[current_index];
     current_index = (current_index + 1) % backend_ports.size();
@@ -84,6 +86,8 @@ void OmniGate::handle_client(int client_fd)
     if (rec_bytes <= 0)
     {
         close(client_fd);
+        MetricsTracker::getInstance().trackStatusCode(400);
+        MetricsTracker::getInstance().decrementActive();
         return;
     }
 
@@ -119,6 +123,8 @@ void OmniGate::handle_client(int client_fd)
         std::string response = "HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n<h1>503: Service Unavailable</h1>";
         send(client_fd, response.c_str(), response.length(), 0);
         close(client_fd);
+        MetricsTracker::getInstance().trackStatusCode(503);
+        MetricsTracker::getInstance().decrementActive();
         return;
     }
 
@@ -139,10 +145,15 @@ void OmniGate::handle_client(int client_fd)
         send(client_fd, response.c_str(), response.length(), 0);
         close(backend_fd);
         close(client_fd);
+        MetricsTracker::getInstance().trackStatusCode(502);
+        MetricsTracker::getInstance().decrementActive();
         return;
     }
-
+    std::this_thread::sleep_for(std::chrono::seconds(2000));
     send(backend_fd, raw_request.c_str(), raw_request.length(), 0);
+
+    int final_status_code = 200;
+    bool is_first_chunk = true;
 
     while (true)
     {
@@ -150,11 +161,39 @@ void OmniGate::handle_client(int client_fd)
         int backend_res = recv(backend_fd, backend_buffer, sizeof(backend_buffer) - 1, 0);
         if (backend_res <= 0)
             break;
+
+        if (is_first_chunk)
+        {
+            is_first_chunk = false;
+            std::string first_line(backend_buffer, std::min(backend_res, 50)); // पहली कुछ बाइट्स लीं
+
+            size_t http_pos = first_line.find("HTTP/");
+            if (http_pos != std::string::npos)
+            {
+                size_t space_pos = first_line.find(" ", http_pos);
+                if (space_pos != std::string::npos && space_pos + 4 <= first_line.length())
+                {
+                    try
+                    {
+                        std::string code_str = first_line.substr(space_pos + 1, 3);
+                        final_status_code = std::stoi(code_str);
+                    }
+                    catch (...)
+                    {
+                        final_status_code = 200;
+                    }
+                }
+            }
+        }
+
         send(client_fd, backend_buffer, backend_res, 0);
     }
 
     close(backend_fd);
     close(client_fd);
+
+    MetricsTracker::getInstance().trackStatusCode(final_status_code);
+    MetricsTracker::getInstance().decrementActive();
 }
 
 void OmniGate::load_config(const std::string &filepath)
@@ -204,6 +243,7 @@ void OmniGate::start_server()
     if (OmniGate::proxy_fd == -1)
     {
         perror("Failed to create proxy server socket");
+
         return;
     }
 
@@ -233,6 +273,9 @@ void OmniGate::start_server()
     {
         int client_fd = accept(OmniGate::proxy_fd, nullptr, nullptr);
 
+        RpsTracker::getInstance().recordRequest();
+        MetricsTracker::getInstance().incrementActive();
+        MetricsTracker::getInstance().incrementRequest();
         if (!OmniGate::start_flag)
         {
             if (client_fd > 0)
@@ -242,7 +285,6 @@ void OmniGate::start_server()
 
         if (client_fd < 0)
             continue;
-
         pool->add_job([this, client_fd]
                       { this->handle_client(client_fd); });
     }

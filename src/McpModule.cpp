@@ -1,22 +1,25 @@
 #include "../include/McpModule.h"
+
 #include <iostream>
 
-
-McpModule::McpModule(int port) : port(port) {
-    setup_routes(); 
+McpModule::McpModule(int port) : port(port)
+{
+    setup_routes();
 }
 
 // Store the definition and the executable function
-void McpModule::register_tool(const ToolDefinition& def, ToolHandler handler) {
+void McpModule::register_tool(const ToolDefinition &def, ToolHandler handler)
+{
     registered_tools.push_back(def);
     tool_handlers[def.name] = handler;
 }
 
 // Define the API behavior
-void McpModule::setup_routes() {
-    
+void McpModule::setup_routes()
+{
     // Tool Discovery Route Node.js MCP server will call this to build Zod schemasand register the tools
-    CROW_ROUTE(app, "/proxy/tools")([this]() {
+    CROW_ROUTE(app, "/proxy/tools")([this]()
+                                    {
         crow::json::wvalue response;
           
         // preparing tools details to return for each tool
@@ -31,11 +34,11 @@ void McpModule::setup_routes() {
                 response["tools"][i]["params"][param_name]["description"] = pair.second.description;
             }
         }
-        return response;
-    });
+        return response; });
 
     //  Tool execuatioon route where evry request will contain tool name and required params
-    CROW_ROUTE(app, "/proxy/execute").methods(crow::HTTPMethod::POST)([this](const crow::request& req) {
+    CROW_ROUTE(app, "/proxy/execute").methods(crow::HTTPMethod::POST)([this](const crow::request &req)
+                                                                      {
         auto body = crow::json::load(req.body);
         if (!body) return crow::response(400, "Invalid JSON body");
 
@@ -48,12 +51,12 @@ void McpModule::setup_routes() {
             return crow::response(200, res);
         }
 
-        return crow::response(404, "Tool not registered in C++");
-    });
+        return crow::response(404, "Tool not registered in C++"); });
 }
 
 // Run the server
-void McpModule::start() {
+void McpModule::start()
+{
     std::cout << "[McpModule] Starting MCP Bridge on port " << port << "..." << std::endl;
-    app.port(port).multithreaded().run();// api running using multiple threads
+    app.port(port).run();
 }
